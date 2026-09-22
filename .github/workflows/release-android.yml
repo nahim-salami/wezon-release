@@ -1,0 +1,125 @@
+# Compile, signe et publie sur le Play Store.
+#
+# Le code vient du dépôt privé, les clés des secrets de ce dépôt. Aucun
+# paquet signé n'est déposé en artefact : les artefacts d'un dépôt public se
+# téléchargent sans être connecté. Le paquet part directement sur la piste
+# choisie.
+#
+# Voir l'en-tête de check.yml pour les trois points de vigilance.
+
+name: Publier · Android
+
+on:
+  repository_dispatch:
+    types: [release-android]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Étiquette du dépôt privé (par exemple mobile-v1.0.0)
+        required: true
+      track:
+        description: Piste
+        type: choice
+        default: internal
+        options: [internal, alpha, beta, production]
+      status:
+        description: État
+        type: choice
+        default: completed
+        options: [draft, completed]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-android
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    # L'environnement porte l'approbation humaine avant une publication en
+    # production, et la liste de qui peut la donner.
+    environment: android
+    timeout-minutes: 45
+    env:
+      REF: ${{ inputs.ref || github.event.client_payload.ref }}
+
+    steps:
+      - name: Code privé
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ vars.MOBILE_REPO }}
+          token: ${{ secrets.MOBILE_REPO_TOKEN }}
+          ref: ${{ env.REF }}
+          path: app
+          persist-credentials: false
+
+      - name: Écrire les clés
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+          KEY_PROPERTIES: ${{ secrets.ANDROID_KEY_PROPERTIES }}
+          GOOGLE_SERVICES: ${{ secrets.ANDROID_GOOGLE_SERVICES_JSON }}
+          PLAY_SERVICE_ACCOUNT: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
+          APP_ENV: ${{ secrets.MOBILE_ENV_PRODUCTION }}
+        run: |
+          set -euo pipefail
+          test -n "$KEYSTORE_B64" || { echo "::error::ANDROID_KEYSTORE_B64 manquant"; exit 1; }
+          printf '%s' "$KEYSTORE_B64" | base64 -d > app/mobile/android/app/upload-keystore.jks
+          printf '%s' "$KEY_PROPERTIES"       > app/mobile/android/key.properties
+          printf '%s' "$GOOGLE_SERVICES"      > app/mobile/android/app/google-services.json
+          printf '%s' "$PLAY_SERVICE_ACCOUNT" > "$RUNNER_TEMP/play.json"
+          printf '%s' "$APP_ENV"              > app/mobile/.env
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version-file: app/mobile/.fvmrc
+          channel: stable
+          cache: true
+
+      - name: Version
+        id: v
+        run: |
+          set -euo pipefail
+          NAME="${REF#mobile-v}"
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+          # Le numéro de construction vient du compteur d'exécutions : il ne
+          # redescend jamais, ce que le Play Store refuse.
+          echo "build=$GITHUB_RUN_NUMBER" >> "$GITHUB_OUTPUT"
+          echo "Version $NAME ($GITHUB_RUN_NUMBER)"
+
+      - name: Compiler
+        working-directory: app
+        run: |
+          set -o pipefail
+          if ! { node scripts/sync-mobile-locales.mjs && cd mobile && flutter pub get && flutter test && \
+                 flutter build appbundle --release \
+                   --build-name=${{ steps.v.outputs.name }} \
+                   --build-number=${{ steps.v.outputs.build }}; } > /tmp/build.log 2>&1; then
+            echo "::error::Compilation ou tests en échec. Relancez « Vérifier » en mode bavard pour diagnostiquer."
+            exit 1
+          fi
+          ls -lh mobile/build/app/outputs/bundle/release/app-release.aab
+
+      - name: Envoyer au Play Store
+        uses: r0adkll/upload-google-play@v1
+        with:
+          serviceAccountJson: ${{ runner.temp }}/play.json
+          packageName: net.ahime.wezon
+          releaseFiles: app/mobile/build/app/outputs/bundle/release/app-release.aab
+          track: ${{ inputs.track || github.event.client_payload.track || 'internal' }}
+          status: ${{ inputs.status || 'completed' }}
+          whatsNewDirectory: app/mobile/whatsnew
+
+      - name: Tout effacer
+        if: always()
+        run: rm -rf app /tmp/build.log "$RUNNER_TEMP/play.json"

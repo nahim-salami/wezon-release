@@ -1,0 +1,110 @@
+# Analyse et teste le code privé, sur une machine gratuite.
+#
+# ─────────────────────────────────────────────────────────────────────────
+# TROIS CHOSES À SAVOIR, PARCE QUE CE DÉPÔT EST PUBLIC
+#
+# 1. Les JOURNAUX d'exécution sont lisibles par tous. Une erreur de
+#    compilation Dart affiche la ligne de code fautive : c'est la seule
+#    fuite possible de ce montage. D'où le mode silencieux par défaut, la
+#    sortie allant dans un fichier dont seul un résumé est affiché. Le mode
+#    bavard existe, à la demande, en connaissance de cause.
+# 2. Les ARTEFACTS sont téléchargeables sans être connecté. L'APK de
+#    débogage n'est donc produit que si on le demande explicitement, et le
+#    workflow le dit.
+# 3. Qui peut MODIFIER ce fichier peut lire le code privé. La protection
+#    est la branche protégée et la revue, pas un réglage technique.
+# ─────────────────────────────────────────────────────────────────────────
+
+name: Vérifier
+
+on:
+  repository_dispatch:
+    types: [check]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Branche ou étiquette du dépôt privé
+        default: main
+      verbose:
+        description: Journal complet (il devient public)
+        type: boolean
+        default: false
+      apk:
+        description: Produire un APK (téléchargeable par tous)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: check
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      REF: ${{ inputs.ref || github.event.client_payload.ref || 'main' }}
+      VERBOSE: ${{ inputs.verbose && 'yes' || 'no' }}
+
+    steps:
+      - name: Code privé
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ vars.MOBILE_REPO }}
+          token: ${{ secrets.MOBILE_REPO_TOKEN }}
+          ref: ${{ env.REF }}
+          path: app
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version-file: app/mobile/.fvmrc
+          channel: stable
+          cache: true
+
+      - name: Traductions
+        working-directory: app
+        run: node scripts/sync-mobile-locales.mjs
+
+      - name: Analyse et tests
+        working-directory: app/mobile
+        run: |
+          set -o pipefail
+          step() {
+            local label="$1"; shift
+            echo "── $label"
+            if [ "$VERBOSE" = "yes" ]; then
+              "$@"
+            elif ! "$@" > /tmp/step.log 2>&1; then
+              echo "::error::$label a échoué. Relancez avec « Journal complet » pour voir pourquoi."
+              # Les messages d'erreur de Dart citent le code source : on
+              # n'affiche que le décompte, jamais les lignes.
+              echo "Lignes en erreur : $(grep -cE '^(error|Error)' /tmp/step.log || true)"
+              return 1
+            fi
+          }
+          step "Dépendances" flutter pub get
+          step "Format"      dart format --output=none --set-exit-if-changed lib test
+          step "Analyse"     flutter analyze
+          step "Tests"       flutter test
+          step "Compilation" flutter build apk --debug
+          echo "Tout est vert."
+
+      - name: APK
+        if: inputs.apk
+        uses: actions/upload-artifact@v4
+        with:
+          name: wezon-debug-${{ github.run_number }}
+          path: app/mobile/build/app/outputs/flutter-apk/app-debug.apk
+          retention-days: 3
+
+      - name: Effacer le code
+        if: always()
+        run: rm -rf app /tmp/step.log

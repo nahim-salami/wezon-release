@@ -1,0 +1,125 @@
+# Compile, signe et envoie sur TestFlight.
+#
+# Même principe qu'Android. La connexion à App Store Connect se fait par
+# CLÉ D'API (.p8), pas par identifiant : un mot de passe demanderait une
+# double authentification qu'aucune machine ne peut satisfaire.
+#
+# Sur un dépôt public, les machines macOS sont gratuites elles aussi : c'est
+# le gain principal de ce montage, une compilation iOS coûtant dix minutes
+# de quota par minute réelle sur un dépôt privé.
+
+name: Publier · iOS
+
+on:
+  repository_dispatch:
+    types: [release-ios]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Étiquette du dépôt privé (par exemple mobile-v1.0.0)
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-ios
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: macos-14
+    environment: ios
+    timeout-minutes: 60
+    env:
+      REF: ${{ inputs.ref || github.event.client_payload.ref }}
+
+    steps:
+      - name: Code privé
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ vars.MOBILE_REPO }}
+          token: ${{ secrets.MOBILE_REPO_TOKEN }}
+          ref: ${{ env.REF }}
+          path: app
+          persist-credentials: false
+
+      - name: Trousseau de signature
+        env:
+          CERT_B64: ${{ secrets.IOS_DIST_CERT_P12_B64 }}
+          CERT_PASSWORD: ${{ secrets.IOS_DIST_CERT_PASSWORD }}
+          PROFILE_B64: ${{ secrets.IOS_PROVISIONING_PROFILE_B64 }}
+          GOOGLE_PLIST: ${{ secrets.IOS_GOOGLE_SERVICE_PLIST }}
+          ASC_KEY_B64: ${{ secrets.ASC_API_KEY_P8_B64 }}
+          ASC_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
+          APP_ENV: ${{ secrets.MOBILE_ENV_PRODUCTION }}
+        run: |
+          set -euo pipefail
+          test -n "$CERT_B64" || { echo "::error::IOS_DIST_CERT_P12_B64 manquant"; exit 1; }
+
+          # Un trousseau jetable, propre à cette exécution : rien ne reste
+          # dans le trousseau de session de la machine.
+          KEYCHAIN=$RUNNER_TEMP/wezon.keychain-db
+          KEYCHAIN_PASSWORD=$(openssl rand -base64 24)
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 3600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+
+          printf '%s' "$CERT_B64" | base64 -d > "$RUNNER_TEMP/dist.p12"
+          security import "$RUNNER_TEMP/dist.p12" -k "$KEYCHAIN" \
+            -P "$CERT_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security >/dev/null
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null
+          security list-keychain -d user -s "$KEYCHAIN" login.keychain-db
+          rm -f "$RUNNER_TEMP/dist.p12"
+          echo "KEYCHAIN=$KEYCHAIN" >> "$GITHUB_ENV"
+
+          mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
+          printf '%s' "$PROFILE_B64" | base64 -d > ~/Library/MobileDevice/Provisioning\ Profiles/wezon.mobileprovision
+
+          mkdir -p ~/private_keys
+          printf '%s' "$ASC_KEY_B64" | base64 -d > ~/private_keys/AuthKey_${ASC_KEY_ID}.p8
+
+          printf '%s' "$GOOGLE_PLIST" > app/mobile/ios/Runner/GoogleService-Info.plist
+          printf '%s' "$APP_ENV" > app/mobile/.env
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version-file: app/mobile/.fvmrc
+          channel: stable
+          cache: true
+
+      - name: Compiler
+        working-directory: app
+        run: |
+          set -o pipefail
+          NAME="${REF#mobile-v}"
+          if ! { node scripts/sync-mobile-locales.mjs && cd mobile && flutter pub get && flutter test && \
+                 flutter build ipa --release \
+                   --build-name="$NAME" \
+                   --build-number="$GITHUB_RUN_NUMBER" \
+                   --export-options-plist=ios/ExportOptions.plist; } > /tmp/build.log 2>&1; then
+            echo "::error::Compilation ou tests en échec. Diagnostiquez avec « Vérifier » en mode bavard."
+            exit 1
+          fi
+          ls -lh mobile/build/ios/ipa/*.ipa
+
+      - name: Envoyer sur TestFlight
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_API_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          xcrun altool --upload-app -f app/mobile/build/ios/ipa/*.ipa -t ios \
+            --apiKey "$ASC_KEY_ID" --apiIssuer "$ASC_ISSUER_ID"
+
+      - name: Tout effacer
+        if: always()
+        run: |
+          security delete-keychain "${KEYCHAIN:-}" 2>/dev/null || true
+          rm -rf ~/private_keys ~/Library/MobileDevice/Provisioning\ Profiles/*.mobileprovision
+          rm -rf app /tmp/build.log
