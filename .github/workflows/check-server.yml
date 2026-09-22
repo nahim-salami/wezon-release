@@ -1,0 +1,84 @@
+# Vérifie le serveur et le site, sur une machine gratuite.
+#
+# Le dépôt privé ne peut plus faire tourner ses propres machines : sur un
+# dépôt privé elles sont comptées, et le quota de ce compte ne le permet
+# pas. Sans ce workflow, 830 tests cesseraient simplement de tourner, et
+# personne ne s'en apercevrait avant la première régression en production.
+#
+# Mêmes précautions que check.yml : ce dépôt est public, donc la sortie va
+# dans un fichier et seul un résumé est affiché. Un message d'erreur de
+# TypeScript ou de Vitest cite le code source.
+
+name: Vérifier le serveur
+
+on:
+  repository_dispatch:
+    types: [check-server]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Branche ou étiquette du dépôt privé
+        default: main
+      verbose:
+        description: Journal complet (il devient public)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: check-server-${{ github.event.client_payload.ref || inputs.ref || 'main' }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      VERBOSE: ${{ inputs.verbose && 'yes' || 'no' }}
+
+    steps:
+      - name: Code privé
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ vars.MOBILE_REPO }}
+          token: ${{ secrets.MOBILE_REPO_TOKEN }}
+          ref: ${{ inputs.ref || github.event.client_payload.ref || 'main' }}
+          path: app
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+          cache-dependency-path: app/pnpm-lock.yaml
+
+      - name: Tout vérifier
+        working-directory: app
+        run: |
+          set -o pipefail
+          step() {
+            local label="$1"; shift
+            echo "── $label"
+            if [ "$VERBOSE" = "yes" ]; then
+              "$@"
+            elif ! "$@" > /tmp/step.log 2>&1; then
+              echo "::error::$label a échoué. Relancez en mode bavard pour voir pourquoi."
+              return 1
+            fi
+          }
+          step "Installation"      pnpm install --frozen-lockfile
+          step "Types, navigateur" pnpm exec tsc --noEmit -p tsconfig.json
+          step "Types, serveur"    pnpm run server:typecheck
+          step "Tests"             pnpm run test
+          step "Construction"      pnpm run build
+          echo "Tout est vert."
+
+      - name: Effacer le code
+        if: always()
+        run: rm -rf app /tmp/step.log
