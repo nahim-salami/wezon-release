@@ -43,6 +43,11 @@ jobs:
           ref: ${{ env.REF }}
           path: app
           persist-credentials: false
+          # Le dépôt suit ses binaires en LFS (.jar, .ttf, .png). Sans
+          # cette ligne, la machine reçoit des POINTEURS TEXTE à leur
+          # place, et Gradle répond « Could not find or load main class »
+          # sur un gradle-wrapper.jar de 130 octets.
+          lfs: true
 
       - name: Trousseau de signature
         env:
