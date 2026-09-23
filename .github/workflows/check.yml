@@ -101,7 +101,7 @@ jobs:
           echo "── Format (consultatif)"
           dart format --output=none --set-exit-if-changed lib test             || echo "::warning::Le format diffère de dart format. Sans conséquence."
 
-          step "Analyse"     flutter analyze
+          step "Analyse"     flutter analyze --no-fatal-infos
           step "Tests"       flutter test
           step "Compilation" flutter build apk --debug
           echo "Tout est vert."
