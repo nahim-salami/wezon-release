@@ -91,7 +91,16 @@ jobs:
             fi
           }
           step "Dépendances" flutter pub get
-          step "Format"      dart format --output=none --set-exit-if-changed lib test
+
+          # Le format est CONSULTATIF, et c'est un choix subi : rien n'est
+          # installé sur le poste de travail, donc personne ne peut lancer
+          # `dart format` avant de pousser, et la machine qui le pourrait
+          # n'a qu'un accès en lecture. Bloquer ici arrêterait le chantier
+          # sur des virgules. Le jour où un poste a Dart, remettre
+          # `--set-exit-if-changed` et le rendre bloquant.
+          echo "── Format (consultatif)"
+          dart format --output=none --set-exit-if-changed lib test             || echo "::warning::Le format diffère de dart format. Sans conséquence."
+
           step "Analyse"     flutter analyze
           step "Tests"       flutter test
           step "Compilation" flutter build apk --debug
