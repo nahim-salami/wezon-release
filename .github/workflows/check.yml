@@ -88,10 +88,25 @@ jobs:
             if [ "$VERBOSE" = "yes" ]; then
               "$@"
             elif ! "$@" > /tmp/step.log 2>&1; then
-              echo "::error::$label a échoué. Relancez avec « Journal complet » pour voir pourquoi."
-              # Les messages d'erreur de Dart citent le code source : on
-              # n'affiche que le décompte, jamais les lignes.
-              echo "Lignes en erreur : $(grep -cE '^(error|Error)' /tmp/step.log || true)"
+              echo "::error::$label a échoué."
+              # Les messages d'erreur de Dart citent le code source : ils ne
+              # sortent jamais d'ici. Ce qu'on publie, c'est l'EMPLACEMENT et
+              # la RÈGLE — « lib/x.dart:12 · unused_import » — parce qu'un
+              # simple décompte ne permettait de rien corriger et obligeait à
+              # relancer en mode bavard, c'est-à-dire à publier tout le code
+              # fautif. Un chemin de fichier dit la structure du projet, pas
+              # son contenu : c'est la fuite la plus petite qui rende ce
+              # montage utilisable.
+              if grep -qF '•' /tmp/step.log; then
+                awk -F '•' '/•/ {
+                  gsub(/^[ 	]+|[ 	]+$/, "", $3);
+                  gsub(/^[ 	]+|[ 	]+$/, "", $4);
+                  if ($4 != "") print "  " $3 " · " $4;
+                }' /tmp/step.log | sort -u | head -40
+              else
+                echo "  Lignes en erreur : $(grep -ciE '(^|[^a-z])error' /tmp/step.log || true)"
+                echo "  Relancez avec « Journal complet » pour voir pourquoi (le journal devient public)."
+              fi
               return 1
             fi
           }
