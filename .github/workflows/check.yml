@@ -8,9 +8,8 @@
 #    fuite possible de ce montage. D'où le mode silencieux par défaut, la
 #    sortie allant dans un fichier dont seul un résumé est affiché. Le mode
 #    bavard existe, à la demande, en connaissance de cause.
-# 2. Les ARTEFACTS sont téléchargeables sans être connecté. L'APK de
-#    débogage n'est donc produit que si on le demande explicitement, et le
-#    workflow le dit.
+# 2. Les ARTEFACTS sont téléchargeables sans être connecté. L'APK n'est
+#    donc produit que si on le demande explicitement, et le workflow le dit.
 # 3. Qui peut MODIFIER ce fichier peut lire le code privé. La protection
 #    est la branche protégée et la revue, pas un réglage technique.
 # ─────────────────────────────────────────────────────────────────────────
@@ -30,7 +29,7 @@ on:
         type: boolean
         default: false
       apk:
-        description: Produire un APK (téléchargeable par tous)
+        description: Produire un APK installable (téléchargeable par tous)
         type: boolean
         default: false
 
@@ -48,6 +47,7 @@ jobs:
     env:
       REF: ${{ inputs.ref || github.event.client_payload.ref || 'main' }}
       VERBOSE: ${{ inputs.verbose && 'yes' || 'no' }}
+      APK: ${{ inputs.apk && 'yes' || 'no' }}
 
     steps:
       - name: Code privé
@@ -123,15 +123,41 @@ jobs:
 
           step "Analyse"     flutter analyze --no-fatal-infos
           step "Tests"       flutter test
-          step "Compilation" flutter build apk --debug
+
+          # Vérifier coûte une compilation de débogage : c'est la plus
+          # rapide, et elle suffit à dire que le code se compile. Quand on
+          # demande un APK, c'est pour l'INSTALLER sur un vrai téléphone, et
+          # là c'est l'inverse qui compte : le débogage pèse 150 Mo, sur des
+          # forfaits où c'est un mois de données. `--release` retire les
+          # symboles et `--split-per-abi` arrête d'embarquer trois
+          # processeurs sur un téléphone qui n'en a qu'un : on passe sous
+          # 25 Mo, le budget que le plan s'est fixé.
+          #
+          # Aucune clé de signature ici, et c'est voulu : le dépôt privé
+          # n'en contient pas et cette machine n'y a pas droit. Gradle
+          # retombe alors sur la clé de DÉBOGAGE (voir
+          # android/app/build.gradle.kts). L'APK s'installe donc pour
+          # essayer, mais il ne peut ni aller sur Play ni mettre à jour une
+          # application qui en vient : c'est `release-android.yml` qui
+          # signe pour de bon.
+          if [ "$APK" = "yes" ]; then
+            step "Compilation" flutter build apk --release --split-per-abi
+          else
+            step "Compilation" flutter build apk --debug
+          fi
           echo "Tout est vert."
 
       - name: APK
         if: inputs.apk
         uses: actions/upload-artifact@v4
         with:
-          name: wezon-debug-${{ github.run_number }}
-          path: app/mobile/build/app/outputs/flutter-apk/app-debug.apk
+          name: wezon-${{ github.run_number }}
+          # Les deux processeurs qu'on trouve sur un téléphone. Le x86_64
+          # que Flutter produit aussi ne sert qu'aux émulateurs, et le
+          # joindre doublerait le téléchargement pour rien.
+          path: |
+            app/mobile/build/app/outputs/flutter-apk/app-arm64-v8a-release.apk
+            app/mobile/build/app/outputs/flutter-apk/app-armeabi-v7a-release.apk
           retention-days: 3
 
       - name: Effacer le code
