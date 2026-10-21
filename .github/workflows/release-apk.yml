@@ -1,0 +1,167 @@
+# Compile l'APK signé que le site propose au téléchargement, et le publie
+# sur la page Releases de CE dépôt.
+#
+# Contrairement à release-android.yml, le paquet est fait pour sortir d'ici :
+# c'est le fichier que n'importe quel commerçant télécharge depuis
+# https://wezon.ahime.net. Le site pointe sur
+#   https://github.com/<ce dépôt>/releases/latest/download/wezon.apk
+# donc chaque publication remplace la précédente sans toucher au site.
+#
+# Il est signé avec la clé DÉFINITIVE (secrets ANDROID_KEYSTORE_B64 et
+# ANDROID_KEY_PROPERTIES), jamais avec la clé de débogage : une clé de
+# débogage change à chaque machine, et chaque mise à jour obligerait le
+# commerçant à désinstaller l'application. Le workflow vérifie l'empreinte
+# avant de publier, et refuse sinon.
+#
+# Voir l'en-tête de check.yml pour les trois points de vigilance.
+
+name: Publier · APK du site
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Étiquette du dépôt privé (par exemple mobile-v1.0.0)
+        required: true
+
+permissions:
+  # Créer la publication et y joindre l'APK, sur ce dépôt seulement.
+  contents: write
+
+concurrency:
+  group: release-apk
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      REF: ${{ inputs.ref }}
+
+    steps:
+      - name: Étiquette
+        run: |
+          case "$REF" in
+            mobile-v[0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "::error::Une étiquette mobile-vX.Y.Z est attendue, pas « $REF »."; exit 1 ;;
+          esac
+
+      - name: Code privé
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ vars.MOBILE_REPO }}
+          token: ${{ secrets.MOBILE_REPO_TOKEN }}
+          ref: ${{ env.REF }}
+          path: app
+          persist-credentials: false
+          lfs: true
+
+      - name: Écrire la clé
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+          KEY_PROPERTIES: ${{ secrets.ANDROID_KEY_PROPERTIES }}
+        run: |
+          set -euo pipefail
+          test -n "$KEYSTORE_B64" || { echo "::error::ANDROID_KEYSTORE_B64 manquant"; exit 1; }
+          test -n "$KEY_PROPERTIES" || { echo "::error::ANDROID_KEY_PROPERTIES manquant"; exit 1; }
+          printf '%s' "$KEYSTORE_B64" | base64 -d > app/mobile/android/app/upload-keystore.jks
+          printf '%s\n' "$KEY_PROPERTIES" > app/mobile/android/key.properties
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version-file: app/mobile/.fvmrc
+          channel: stable
+          cache: true
+
+      - name: Version
+        id: v
+        run: |
+          set -euo pipefail
+          NAME="${REF#mobile-v}"
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+          # Le numéro de construction vient du compteur d'exécutions : il ne
+          # redescend jamais, sinon Android refuse d'installer la mise à jour
+          # par-dessus.
+          echo "build=$GITHUB_RUN_NUMBER" >> "$GITHUB_OUTPUT"
+          echo "Version $NAME ($GITHUB_RUN_NUMBER)"
+
+      # Silencieux, comme check.yml : une erreur Dart cite le code source.
+      #
+      # Un seul fichier pour les deux processeurs des téléphones (arm64 et
+      # l'ancien arm 32 bits, encore courant sur les modèles d'entrée de
+      # gamme) : le commerçant ne sait pas lequel il a, et un APK du mauvais
+      # processeur ne s'installe pas. Le x86_64 des émulateurs est laissé de
+      # côté.
+      - name: Compiler
+        working-directory: app
+        run: |
+          set -o pipefail
+          if ! { node scripts/sync-mobile-locales.mjs && cd mobile && flutter pub get && flutter test && \
+                 flutter build apk --release \
+                   --target-platform android-arm,android-arm64 \
+                   --build-name=${{ steps.v.outputs.name }} \
+                   --build-number=${{ steps.v.outputs.build }}; } > /tmp/build.log 2>&1; then
+            echo "::error::Compilation ou tests en échec. Relancez « Vérifier » en mode bavard pour diagnostiquer."
+            exit 1
+          fi
+          cp mobile/build/app/outputs/flutter-apk/app-release.apk "$RUNNER_TEMP/wezon.apk"
+          ls -lh "$RUNNER_TEMP/wezon.apk"
+
+      # Un APK signé par la clé de débogage s'installerait, puis rendrait
+      # chaque mise à jour impossible sans désinstaller. On compare
+      # l'empreinte du certificat à celle de la clé définitive.
+      - name: Vérifier la signature
+        run: |
+          set -euo pipefail
+          PROPS=app/mobile/android/key.properties
+          PASS=$(grep '^storePassword=' "$PROPS" | cut -d= -f2-)
+          ALIAS=$(grep '^keyAlias=' "$PROPS" | cut -d= -f2-)
+          WANT=$(keytool -list -v -keystore app/mobile/android/app/upload-keystore.jks \
+                   -storepass "$PASS" -alias "$ALIAS" | grep -E 'SHA256:' | head -1 | awk '{print $2}')
+          APKSIGNER=$(ls "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -1)
+          GOT=$("$APKSIGNER" verify --print-certs "$RUNNER_TEMP/wezon.apk" \
+                  | grep -i 'certificate SHA-256 digest' | head -1 | awk '{print $NF}' | tr 'a-f' 'A-F')
+          WANT_FLAT=$(echo "$WANT" | tr -d ':' | tr 'a-f' 'A-F')
+          if [ -z "$WANT_FLAT" ] || [ "$GOT" != "$WANT_FLAT" ]; then
+            echo "::error::L'APK n'est pas signé par la clé définitive. Rien n'est publié."
+            exit 1
+          fi
+          echo "Signé par la clé définitive : $WANT"
+          echo "CERT_SHA256=$WANT" >> "$GITHUB_ENV"
+
+      - name: Publier
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          SIZE=$(du -m "$RUNNER_TEMP/wezon.apk" | cut -f1)
+          SUM=$(sha256sum "$RUNNER_TEMP/wezon.apk" | cut -d' ' -f1)
+          {
+            echo "Application Wézon pour Android, version ${{ steps.v.outputs.name }} (${{ steps.v.outputs.build }})."
+            echo
+            cat app/mobile/whatsnew/whatsnew-fr-FR 2>/dev/null || true
+            echo
+            echo "Taille : environ ${SIZE} Mo."
+            echo
+            echo "SHA-256 du fichier : \`${SUM}\`"
+            echo "Certificat de signature (SHA-256) : \`${CERT_SHA256}\`"
+          } > "$RUNNER_TEMP/notes.md"
+          gh release create "$REF" "$RUNNER_TEMP/wezon.apk" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Wézon ${{ steps.v.outputs.name }}" \
+            --notes-file "$RUNNER_TEMP/notes.md" \
+            --latest
+
+      - name: Tout effacer
+        if: always()
+        run: rm -rf app /tmp/build.log "$RUNNER_TEMP/wezon.apk" "$RUNNER_TEMP/notes.md"

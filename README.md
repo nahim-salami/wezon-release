@@ -1,6 +1,6 @@
 # Wézon · chaîne de compilation
 
-Ce dépôt **ne contient aucun code applicatif**. Il contient trois fichiers
+Ce dépôt **ne contient aucun code applicatif**. Il contient les fichiers
 de configuration qui compilent et publient l'application mobile Wézon, dont
 le code vit dans un dépôt privé.
 
@@ -11,7 +11,11 @@ d'exécution, compilé, puis la machine est détruite.
 - `init-platforms.yml` génère les dossiers Android et iOS d'un projet
   Flutter neuf. Il n'accède à rien de privé.
 - `check.yml` analyse et teste le code privé.
-- `release-android.yml` et `release-ios.yml` signent et publient.
+- `release-android.yml` et `release-ios.yml` signent et publient sur les
+  magasins.
+- `release-apk.yml` signe l'APK que le site propose au téléchargement et le
+  publie sur la page Releases de ce dépôt : c'est le seul paquet fait pour
+  être téléchargé par tous.
 
 Wézon est un service de Ahime, Abomey-Calavi, Bénin.
 https://wezon.ahime.net
