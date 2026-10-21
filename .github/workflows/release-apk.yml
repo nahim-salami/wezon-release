@@ -120,7 +120,7 @@ jobs:
             grep -E 'Some tests failed|All tests passed|^[0-9:]+ \+[0-9]+.*-[0-9]+' /tmp/build.log | tail -3 || true
             exit 1
           fi
-          cp mobile/build/app/outputs/flutter-apk/app-release.apk "$RUNNER_TEMP/wezon.apk"
+          cp "$GITHUB_WORKSPACE/app/mobile/build/app/outputs/flutter-apk/app-release.apk" "$RUNNER_TEMP/wezon.apk"
           ls -lh "$RUNNER_TEMP/wezon.apk"
 
       # Un APK signé par la clé de débogage s'installerait, puis rendrait
