@@ -111,7 +111,13 @@ jobs:
                    --target-platform android-arm,android-arm64 \
                    --build-name=${{ steps.v.outputs.name }} \
                    --build-number=${{ steps.v.outputs.build }}; } > /tmp/build.log 2>&1; then
-            echo "::error::Compilation ou tests en échec. Relancez « Vérifier » en mode bavard pour diagnostiquer."
+            echo "::error::Compilation ou tests en échec."
+            # Ce qui peut sortir sans publier de code : le bloc « What went
+            # wrong » de Gradle (signature, R8, ressources) et le résumé des
+            # tests. Une erreur de compilation Dart, elle, reste dans le
+            # fichier : relancer « Vérifier » en mode bavard pour la lire.
+            grep -A8 'What went wrong' /tmp/build.log | grep -vE '\.dart:[0-9]' | head -30 || true
+            grep -E 'Some tests failed|All tests passed|^[0-9:]+ \+[0-9]+.*-[0-9]+' /tmp/build.log | tail -3 || true
             exit 1
           fi
           cp mobile/build/app/outputs/flutter-apk/app-release.apk "$RUNNER_TEMP/wezon.apk"
