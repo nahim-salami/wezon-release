@@ -137,6 +137,9 @@ jobs:
           # sont comptées, pas fatales ; ce sont les données qui jugent.
           "$PG/pg_restore" --no-owner --no-privileges --dbname="$LOCAL" wezon.dump 2> restore.log || true
           echo "Avertissements de restauration : $(grep -c 'error' restore.log || true)"
+          # Les messages ne citent que la structure (tables, fonctions), jamais
+          # les données ; on en montre la première ligne de chacun.
+          grep -E '^pg_restore: error' restore.log | cut -c1-200 | head -20 || true
           Q="select (select count(*) from users)||' comptes, '||(select count(*) from businesses)||' boutiques, '||(select count(*) from orders)||' commandes, '||(select count(*) from products)||' articles'"
           GOT=$("$PG/psql" "$LOCAL" -tAc "$Q")
           REAL=$("$PG/psql" "$DATABASE_URL" -tAc "$Q")
