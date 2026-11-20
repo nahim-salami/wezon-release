@@ -1,0 +1,84 @@
+# Sauvegarde hebdomadaire de la base de Wézon, chiffrée, vers Cloudflare R2.
+#
+# Copie versionnée du workflow de nahim-salami/wezon-release
+# (.github/workflows/backup-db.yml). Il ne clone pas le dépôt privé : il
+# n'a besoin que de la base.
+#
+# Le dépôt est PUBLIC : les journaux sont lisibles par tous. Rien n'y est
+# écrit hormis des tailles et des comptes ; la sauvegarde est chiffrée
+# (AES-256, phrase dans le secret BACKUP_PASSPHRASE) avant de quitter la
+# machine, qui est détruite ensuite. Aucun artefact GitHub n'est produit.
+#
+# Restaurer : docs/hebergement/SAUVEGARDES.md.
+name: Sauvegarder la base
+
+on:
+  schedule:
+    - cron: '0 2 * * 0' # dimanche 02:00 UTC, 03:00 à Cotonou
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: backup-db
+  cancel-in-progress: false
+
+jobs:
+  backup:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      DATABASE_URL: ${{ secrets.WEZON_DATABASE_URL }}
+      BACKUP_PASSPHRASE: ${{ secrets.BACKUP_PASSPHRASE }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: auto
+      R2_ENDPOINT: https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
+      R2_BUCKET: ${{ secrets.R2_BUCKET }}
+    steps:
+      - name: Vérifier les secrets
+        run: |
+          for v in DATABASE_URL BACKUP_PASSPHRASE AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY R2_BUCKET; do
+            [ -n "${!v}" ] || { echo "Secret manquant : $v"; exit 1; }
+          done
+
+      # pg_dump doit être d'une version au moins égale à celle du serveur
+      # (Neon : PostgreSQL 18).
+      - name: Installer le client PostgreSQL 18
+        run: |
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -fsSo /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt noble-pgdg main" | sudo tee /etc/apt/sources.list.d/pgdg.list > /dev/null
+          sudo apt-get update -qq > /dev/null
+          sudo apt-get install -y -qq postgresql-client-18 > /dev/null
+          /usr/lib/postgresql/18/bin/pg_dump --version
+
+      - name: Sauvegarder
+        run: |
+          set -o pipefail
+          PG=/usr/lib/postgresql/18/bin
+          if ! "$PG/pg_dump" --format=custom --compress=9 --no-owner --no-privileges \
+                 --dbname="$DATABASE_URL" --file=wezon.dump 2> err.log; then
+            echo "pg_dump a échoué :"; head -c 300 err.log; exit 1
+          fi
+          # Une sauvegarde illisible ne vaut rien : on la relit avant de l'envoyer.
+          TABLES=$("$PG/pg_restore" --list wezon.dump | grep -c 'TABLE DATA' || true)
+          echo "Tables sauvegardées : $TABLES, taille : $(du -h wezon.dump | cut -f1)"
+          [ "$TABLES" -ge 50 ] || { echo "Trop peu de tables, sauvegarde refusée"; exit 1; }
+
+      - name: Chiffrer
+        run: |
+          STAMP=$(date -u +%Y-%m-%dT%H%MZ)
+          echo "NAME=wezon-$STAMP.dump.enc" >> "$GITHUB_ENV"
+          sha256sum wezon.dump | cut -d' ' -f1 > "wezon-$STAMP.sha256"
+          openssl enc -aes-256-cbc -pbkdf2 -iter 600000 -salt -pass env:BACKUP_PASSPHRASE \
+            -in wezon.dump -out "wezon-$STAMP.dump.enc"
+          shred -u wezon.dump
+          echo "SUM=wezon-$STAMP.sha256" >> "$GITHUB_ENV"
+
+      - name: Envoyer vers R2
+        run: |
+          aws s3 cp "$NAME" "s3://$R2_BUCKET/hebdo/$NAME" --endpoint-url "$R2_ENDPOINT" --only-show-errors
+          aws s3 cp "$SUM" "s3://$R2_BUCKET/hebdo/$SUM" --endpoint-url "$R2_ENDPOINT" --only-show-errors
+          echo "Envoyé : hebdo/$NAME ($(du -h "$NAME" | cut -f1))"
+          echo "Sauvegardes présentes : $(aws s3 ls "s3://$R2_BUCKET/hebdo/" --endpoint-url "$R2_ENDPOINT" | grep -c '\.dump\.enc$')"
